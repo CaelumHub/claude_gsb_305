@@ -33,6 +33,7 @@ class Scheduler:
 
     def __init__(self, registry, build_registry, executor, env_manager,
                  report_gen, coverage_analyzer, defect_manager, notify_manager,
+                 cluster_manager=None,
                  max_build_workers: int = 4, max_case_workers: int = 8,
                  tick_seconds: float = 20.0):
         self.registry = registry
@@ -43,6 +44,7 @@ class Scheduler:
         self.coverage = coverage_analyzer
         self.defects = defect_manager
         self.notify = notify_manager
+        self.clusters = cluster_manager
 
         self.max_build_workers = max_build_workers
         self.max_case_workers = max_case_workers
@@ -52,6 +54,11 @@ class Scheduler:
             max_workers=max_build_workers, thread_name_prefix="build")
         self._running: dict[str, dict] = {}
         self._running_lock = threading.Lock()
+        # 同项目构建收尾串行化：失败聚类要读「上一场构建」沉淀的锚点 /
+        # 缺陷特征，两场构建并发收尾时若交错，会各自以为「还没有缺陷」
+        # 而重复建缺陷。按项目加锁即可避免。
+        self._finalize_locks: dict[str, threading.Lock] = {}
+        self._finalize_locks_guard = threading.Lock()
 
         self._stop_event = threading.Event()
         self._tick_thread: Optional[threading.Thread] = None
@@ -208,15 +215,26 @@ class Scheduler:
             status = "passed"
         else:
             status = "failed"
-        store.finish(build_id, status)
-        store.append_log(build_id, f"构建结束: {status}（通过 {build.get('passed', 0)}"
-                                   f"/{build.get('total', 0)}）")
 
-        # 收尾：报告 + 覆盖率 + 通知 + 自动缺陷
-        self._finalize(project_id, build_id)
+        # 收尾（报告 / 覆盖率 / 通知 / 失败聚类）在同项目维度串行完成，
+        # 然后再把构建标成终态——这样外部按「终态」观察到的构建，其
+        # 失败簇与缺陷归并一定已经落盘，不会被下一场并发构建抢跑。
+        with self._finalize_lock(project_id):
+            self._finalize(project_id, build_id, status)
+            store.finish(build_id, status)
+            store.append_log(build_id, f"构建结束: {status}（通过 {build.get('passed', 0)}"
+                                       f"/{build.get('total', 0)}）")
 
         with self._running_lock:
             self._running.pop(build_id, None)
+
+    def _finalize_lock(self, project_id: str) -> threading.Lock:
+        with self._finalize_locks_guard:
+            lock = self._finalize_locks.get(project_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._finalize_locks[project_id] = lock
+            return lock
 
     def _run_one(self, case: dict, env_config: dict, env_id: str,
                  index: int, cancel_event: threading.Event) -> dict:
@@ -234,7 +252,7 @@ class Scheduler:
             log_text = "\n".join(result.get("logs", []))
             store.write_case_log(build_id, case_id, log_text)
 
-    def _finalize(self, project_id: str, build_id: str) -> None:
+    def _finalize(self, project_id: str, build_id: str, status: str) -> None:
         store = self.builds.for_project(project_id)
         build = store.get(build_id)
         if build is None:
@@ -244,7 +262,8 @@ class Scheduler:
         passed_ratio = (passed / total) if total else 1.0
 
         try:
-            self.report_gen.build_report(project_id, build_id, force=True)
+            self.report_gen.build_report(project_id, build_id, force=True,
+                                         final_status=status)
         except Exception:  # noqa: BLE001
             pass
         try:
@@ -253,11 +272,11 @@ class Scheduler:
             pass
 
         # 通知
-        event = "build.passed" if build["status"] == "passed" else "build.failed"
+        event = "build.passed" if status == "passed" else "build.failed"
         payload = {
             "build_id": build_id,
             "project_id": project_id,
-            "status": build["status"],
+            "status": status,
             "passed": passed,
             "total": total,
             "pass_rate": round(passed_ratio * 100, 1),
@@ -266,12 +285,32 @@ class Scheduler:
         self.notify.fire(project_id, "build.finished", payload)
         self.notify.fire(project_id, event, payload)
 
-        # 自动缺陷（项目配置开启时，把失败用例转成缺陷）
-        project = self.registry.store("projects").get(project_id)
-        if project and project.get("auto_create_defects"):
-            failures = store.results(build_id, where=[("status", "in", ["failed", "error", "timeout"])])
-            for fr in failures[:20]:
-                self.defects.create_from_case(project_id, fr, build_id)
+        # 失败聚类：命中已有未关闭缺陷则自动归并，否则按簇各建一条缺陷
+        # （项目开启 auto_create_defects 时），不再逐用例重复建缺陷。
+        if self.clusters is not None:
+            try:
+                result = self.clusters.cluster_build(project_id, build_id)
+                failed_total = result.get("total_failed", 0)
+                linked = sum(1 for c in result.get("clusters", [])
+                             if c.get("defect_id"))
+                if failed_total:
+                    store.append_log(
+                        build_id,
+                        f"失败聚类：{failed_total} 个失败用例 -> "
+                        f"{result.get('cluster_count', 0)} 个簇，"
+                        f"{linked} 个已关联缺陷")
+            except Exception as exc:  # noqa: BLE001
+                store.append_log(build_id, f"失败聚类异常: {exc}")
+            finally:
+                # 聚类落盘标记：finish 之前完成，外部看到终态时簇必已就绪
+                store.update(build_id, {"clustered_at": time.time()})
+        else:
+            # 兼容旧路径（未注入聚类管理器时）
+            project = self.registry.store("projects").get(project_id)
+            if project and project.get("auto_create_defects"):
+                failures = store.results(build_id, where=[("status", "in", ["failed", "error", "timeout"])])
+                for fr in failures[:20]:
+                    self.defects.create_from_case(project_id, fr, build_id)
 
     # ------------------------------------------------------------------ 定时循环
     def _tick_loop(self) -> None:

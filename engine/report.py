@@ -41,7 +41,7 @@ class ReportGenerator:
 
     # -- 单次构建报告 -----------------------------------------------------
     def build_report(self, project_id: str, build_id: str,
-                     force: bool = False) -> dict:
+                     force: bool = False, final_status: Optional[str] = None) -> dict:
         store = self.builds.for_project(project_id)
         build = store.get(build_id)
         if build is None:
@@ -52,8 +52,14 @@ class ReportGenerator:
         if cached and not force:
             return cached
 
-        report = self._compute(store, build_id, build)
-        if build.get("status") not in ("running", "pending"):
+        effective = dict(build)
+        if final_status is not None:
+            # 构建收尾时终态尚未写回 build.json，但报告需要按终态生成
+            # 并写缓存（调用方保证稍后即 finish）。
+            effective["status"] = final_status
+        report = self._compute(store, build_id, effective)
+        status_for_cache = final_status or build.get("status")
+        if status_for_cache not in ("running", "pending"):
             store.write_report(build_id, report)
         return report
 

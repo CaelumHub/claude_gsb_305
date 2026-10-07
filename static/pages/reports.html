@@ -15,6 +15,20 @@
     .trend .col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; }
     .trend .col .bar-v { width: 100%; max-width: 40px; border-radius: 5px 5px 0 0; }
     .trend .col .lbl { font-size: 10px; color: var(--text-muted); transform: rotate(0); white-space: nowrap; }
+    .clu-card { border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; margin-bottom: 10px; }
+    .clu-card.manual { border-left: 3px solid var(--primary); }
+    .clu-members { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 6px;
+      max-height: 180px; overflow: auto; }
+    .clu-members label { display: flex; gap: 6px; align-items: baseline; font-size: 13px;
+      padding: 2px 4px; cursor: pointer; }
+    .clu-members label:hover { background: var(--primary-soft); border-radius: 5px; }
+    .dim-tag { font-size: 11px; padding: 1px 7px; border-radius: 10px; background: #eef2ff;
+      color: #4f46e5; white-space: nowrap; }
+    .dim-endpoint { background:#e0f2fe; color:#0369a1; }
+    .dim-assertion { background:#fef3e2; color:#b45309; }
+    .dim-keyword { background:#f1f5f9; color:#475569; }
+    .dim-status { background:#fdecec; color:var(--red); }
+    .dim-merged { background:#ede9fe; color:#6d28d9; }
   </style>
 </head>
 <body>
@@ -38,6 +52,12 @@
     <section class="card">
       <h2>通过率趋势</h2>
       <div id="trend"><div class="empty">加载中…</div></div>
+    </section>
+
+    <!-- 跨构建失败点 -->
+    <section class="card">
+      <h2>反复出现的失败点 <span class="muted" style="font-size:13px;font-weight:400">跨构建追踪同一失败特征</span></h2>
+      <div id="failure-points"><div class="empty">加载中…</div></div>
     </section>
 
     <div class="grid cols-2">
@@ -66,10 +86,11 @@ async function init() {
   const params = new URLSearchParams(location.search);
   projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
   await loadAll();
+  loadFailurePoints();
   if (builds[0]) selectBuild(builds[0].id);
 }
 
-async function switchProject(id) { projectId = id; currentBuild = null; await loadAll(); }
+async function switchProject(id) { projectId = id; currentBuild = null; await loadAll(); loadFailurePoints(); }
 
 async function loadAll() {
   if (!projectId) return;
@@ -110,6 +131,7 @@ async function selectBuild(id) {
   loadBuilds();
   const r = await api(`/api/builds/${id}/report`);
   renderReport(r);
+  loadClusters(id);
 }
 
 function renderReport(r) {
@@ -132,6 +154,7 @@ function renderReport(r) {
       ${statusBadge(r.status)}
       <span class="muted" style="font-size:13px">触发 ${esc(r.trigger||'manual')} · ${fmtTime(r.started_at)} → ${fmtTime(r.finished_at)}</span>
     </div>
+    <div class="mt" id="clusters-host"></div>
     <div class="mt grid cols-4">
       <div class="stat"><div class="v">${fmtDur(d.avg)}</div><div class="k">平均耗时</div></div>
       <div class="stat"><div class="v">${fmtDur(d.median)}</div><div class="k">中位耗时</div></div>
@@ -162,7 +185,140 @@ function renderReport(r) {
         <td>${statusBadge(x.status)}</td><td>${fmtDur(x.duration)}</td></tr>`).join("")}</tbody></table></div>` : ""}`;
 }
 
-$("#btn-refresh").onclick = async () => { await loadAll(); if (currentBuild) selectBuild(currentBuild); };
+$("#btn-refresh").onclick = async () => { await loadAll(); if (currentBuild) selectBuild(currentBuild); loadFailurePoints(); };
+
+/* ==================== 失败聚类 ==================== */
+const DIM_LABELS = { endpoint: "同一接口", assertion: "同一断言", keyword: "同一报错", status: "超时/状态", merged: "人工合并" };
+let clusterData = [];
+
+async function loadClusters(buildId) {
+  const host = $("#clusters-host");
+  if (!host) return;
+  host.innerHTML = '<h3>失败聚类</h3><div class="empty">聚类中…</div>';
+  try {
+    const d = await api(`/api/builds/${buildId}/clusters`);
+    clusterData = d.clusters || [];
+    renderClusters(d, buildId);
+  } catch (e) {
+    host.innerHTML = `<h3>失败聚类</h3><div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+function dimTag(dim) {
+  return `<span class="dim-tag dim-${esc(dim)}">${DIM_LABELS[dim] || dim}</span>`;
+}
+
+function defectBadge(c) {
+  if (c.defect) {
+    return `<span class="badge ${c.defect.status}" title="${esc(c.defect.title)}">缺陷 ${esc(c.defect.id.slice(-8))} · ${esc(c.defect.status)}</span>`;
+  }
+  return '<span class="tag" style="color:var(--text-muted)">未关联缺陷</span>';
+}
+
+function renderClusters(d, buildId) {
+  const host = $("#clusters-host");
+  if (!d.total_failed) { host.innerHTML = ""; return; }
+  const toolbar = `
+    <div class="row spread">
+      <h3 style="margin:0">失败聚类 <span class="muted" style="font-size:13px;font-weight:400">${d.total_failed} 个失败 → ${d.cluster_count} 簇</span></h3>
+      <span class="muted" style="font-size:12px">勾选多个簇可合并；每簇可拆分 / 转缺陷 / 改关联</span>
+    </div>`;
+  const cards = d.clusters.map(c => `
+    <div class="clu-card ${c.manual ? "manual" : ""}" data-gid="${esc(c.group_id)}">
+      <div class="row spread">
+        <div class="row" style="gap:8px">
+          <input type="checkbox" class="clu-pick" value="${esc(c.group_id)}" title="选择以合并">
+          ${dimTag(c.dim)}
+          <strong>${esc(c.title)}</strong>
+          ${c.manual ? '<span class="tag" style="background:var(--primary-soft);color:var(--primary)">人工调整</span>' : ""}
+        </div>
+        <div class="row" style="gap:6px">${defectBadge(c)}<span class="badge failed">${c.count} 用例</span></div>
+      </div>
+      <div class="muted mt" style="font-size:12px">代表性报错：${esc(c.reason || "")}</div>
+      <div class="clu-members">
+        ${c.cases.map(x => `
+          <label><input type="checkbox" class="case-pick" value="${esc(x.case_id)}">
+            ${statusBadge(x.status)} <span>${esc(x.case_name || x.case_id)}</span>
+            <span class="muted" style="font-size:12px;margin-left:auto">${esc((x.reason||"").slice(0, 60))}</span>
+          </label>`).join("")}
+      </div>
+      <div class="row mt" style="gap:6px;flex-wrap:wrap">
+        <button class="btn small" onclick="toDefect('${esc(buildId)}','${esc(c.group_id)}')">${c.defect_id ? "关联到其他缺陷" : "转成缺陷"}</button>
+        <button class="btn small secondary" onclick="splitCluster('${esc(buildId)}','${esc(c.group_id)}')">拆出勾选用例</button>
+        ${c.manual ? `<button class="btn small secondary" onclick="resetCluster('${esc(buildId)}','${esc(c.group_id)}')">恢复自动</button>` : ""}
+      </div>
+    </div>`).join("");
+  const mergeBar = `
+    <div class="row mt" style="gap:8px;padding:8px 10px;background:var(--primary-soft);border-radius:8px">
+      <button class="btn small" onclick="mergePicked('${esc(buildId)}')">合并勾选项</button>
+      <span class="muted" style="font-size:12px">勾选簇标题前的方框，可把不同原因的簇合并为一个</span>
+    </div>`;
+  host.innerHTML = `<h3>失败聚类</h3>` + toolbar + cards + mergeBar;
+}
+
+function picked(rootSel) {
+  return $$(rootSel).map(el => el.value);
+}
+
+async function mergePicked(buildId) {
+  const ids = picked(".clu-pick:checked");
+  if (ids.length < 2) return toast("请至少勾选两个簇", "error");
+  if (!confirm(`确认把选中的 ${ids.length} 个簇合并？`)) return;
+  await api(`/api/builds/${buildId}/clusters/merge`, { method: "POST", body: { group_ids: ids } });
+  toast("已合并"); loadClusters(buildId);
+}
+
+async function splitCluster(buildId, gid) {
+  const card = document.querySelector(`.clu-card[data-gid="${gid}"]`);
+  const ids = Array.from(card.querySelectorAll(".case-pick:checked")).map(el => el.value);
+  if (!ids.length) return toast("请先在簇内勾选要拆出的用例", "error");
+  if (!confirm(`确认把 ${ids.length} 个用例从该簇拆出？`)) return;
+  await api(`/api/builds/${buildId}/clusters/${gid}/split`,
+            { method: "POST", body: { case_ids: ids } });
+  toast("已拆分"); loadClusters(buildId);
+}
+
+async function toDefect(buildId, gid) {
+  const defectId = prompt("输入要关联的缺陷 id（留空则按本簇特征新建一条缺陷）：", "");
+  if (defectId === null) return;
+  if (defectId.trim()) {
+    await api(`/api/builds/${buildId}/clusters/${gid}/defect`,
+              { method: "PUT", body: { defect_id: defectId.trim() } });
+    toast("已关联缺陷");
+  } else {
+    await api(`/api/builds/${buildId}/clusters/${gid}/defect`, { method: "POST", body: {} });
+    toast("已按簇创建缺陷");
+  }
+  loadClusters(buildId);
+}
+
+async function resetCluster(buildId, gid) {
+  if (!confirm("清除该簇的人工调整，恢复自动聚类？")) return;
+  await api(`/api/builds/${buildId}/clusters/${gid}/override`, { method: "DELETE" });
+  toast("已恢复自动聚类"); loadClusters(buildId);
+}
+
+/* ==================== 跨构建失败点 ==================== */
+async function loadFailurePoints() {
+  if (!projectId) return;
+  const host = $("#failure-points");
+  const d = await api(`/api/projects/${projectId}/failure-points?limit=15`);
+  const pts = d.points || [];
+  if (!pts.length) { host.innerHTML = '<div class="empty">暂无跨构建失败记录</div>'; return; }
+  host.innerHTML = `<table>
+    <thead><tr><th>失败特征</th><th>维度</th><th>出现</th><th>涉及构建</th><th>最近出现</th><th>关联缺陷</th></tr></thead>
+    <tbody>${pts.map(p => `
+      <tr>
+        <td style="max-width:340px"><div>${esc((p.case_names[0] || p.signature || "").slice(0, 40))}</div>
+          <div class="muted" style="font-size:11px">${esc(p.signature || "")}</div></td>
+        <td>${dimTag(p.dim)}</td>
+        <td>${p.occurrences} 次 / ${p.build_count} 场</td>
+        <td>${p.builds.slice(0, 5).map(b => `<a href="javascript:selectBuild('${esc(b.build_id)}')">${esc(b.build_id.slice(-6))}</a>`).join(" ")}</td>
+        <td>${fmtTime(p.last_seen)}</td>
+        <td>${p.defect ? `<span class="badge ${p.defect.status}">${esc(p.defect.status)}</span>`
+                       : '<span class="muted">—</span>'}</td>
+      </tr>`).join("")}</tbody></table>`;
+}
 
 init();
 </script>

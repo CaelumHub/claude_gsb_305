@@ -53,6 +53,10 @@ def _defects():
     return current_app.config["DEFECTS"]
 
 
+def _clusters():
+    return current_app.config["CLUSTERS"]
+
+
 def _notify():
     return current_app.config["NOTIFY"]
 
@@ -450,6 +454,89 @@ def project_reports(project_id: str):
 
 
 # ---------------------------------------------------------------------------
+# 失败聚类
+# ---------------------------------------------------------------------------
+
+@api.get("/builds/<build_id>/clusters")
+def build_clusters(build_id: str):
+    """某场构建的失败簇（幂等：未聚类过会即时计算，已在构建收尾时算好）。"""
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    result = _clusters().cluster_build(build["project_id"], build_id)
+    if "error" in result:
+        return _err(result["error"], 404)
+    return jsonify(result)
+
+
+@api.post("/builds/<build_id>/clusters/merge")
+def merge_clusters(build_id: str):
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    data = _payload()
+    result = _clusters().merge(build["project_id"], build_id,
+                               data.get("group_ids") or [])
+    if "error" in result:
+        return _err(result["error"])
+    return jsonify(result)
+
+
+@api.post("/builds/<build_id>/clusters/<group_id>/split")
+def split_cluster(build_id: str, group_id: str):
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    data = _payload()
+    result = _clusters().split(build["project_id"], build_id, group_id,
+                               data.get("case_ids") or [])
+    if "error" in result:
+        return _err(result["error"])
+    return jsonify(result)
+
+
+@api.put("/builds/<build_id>/clusters/<group_id>/defect")
+def assign_cluster_defect(build_id: str, group_id: str):
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    data = _payload()
+    defect_id = data.get("defect_id") or None
+    result = _clusters().assign_defect(build["project_id"], build_id,
+                                       group_id, defect_id)
+    if "error" in result:
+        return _err(result["error"])
+    return jsonify(result)
+
+
+@api.post("/builds/<build_id>/clusters/<group_id>/defect")
+def create_defect_from_cluster(build_id: str, group_id: str):
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    result = _clusters().create_defect_for_cluster(
+        build["project_id"], build_id, group_id, _payload())
+    if "error" in result:
+        return _err(result["error"])
+    return jsonify(result)
+
+
+@api.delete("/builds/<build_id>/clusters/<group_id>/override")
+def reset_cluster(build_id: str, group_id: str):
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    return jsonify(_clusters().reset(build["project_id"], build_id, group_id))
+
+
+@api.get("/projects/<project_id>/failure-points")
+def failure_points(project_id: str):
+    """跨构建失败点：同一失败特征在多场构建里的反复出现情况。"""
+    limit = request.args.get("limit", 50, type=int)
+    return jsonify(_clusters().failure_points(project_id, limit=limit))
+
+
+# ---------------------------------------------------------------------------
 # 代码覆盖率
 # ---------------------------------------------------------------------------
 
@@ -507,7 +594,7 @@ def update_defect(defect_id: str):
         return _err("缺陷不存在", 404)
     data = _payload()
     patch = {k: data[k] for k in ("title", "description", "severity", "status",
-                                  "assignee", "tags") if k in data}
+                                  "assignee", "tags", "signatures") if k in data}
     return jsonify(_defects().update(defect_id, patch))
 
 

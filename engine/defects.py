@@ -36,6 +36,11 @@ class DefectManager:
             "source_build_id": payload.get("source_build_id"),
             "assignee": payload.get("assignee", ""),
             "tags": payload.get("tags") or [],
+            # 失败特征签名：新构建的失败簇命中其中任一签名即可自动归并，
+            # 不再重复建缺陷。由失败聚类 / 人工关联时维护。
+            "signatures": payload.get("signatures") or [],
+            "cluster_id": payload.get("cluster_id"),
+            "hit_count": payload.get("hit_count", 0),
         }
         self._store.insert(defect)
         return defect
@@ -62,6 +67,52 @@ class DefectManager:
             "source_case_id": case_result.get("case_id"),
             "source_build_id": build_id,
         })
+
+    def create_from_cluster(self, project_id: str, cluster: dict,
+                            build_id: str, payload: Optional[dict] = None) -> Optional[dict]:
+        """从一个失败簇生成缺陷：整簇共用一条，携带簇内全部失败特征。
+
+        以后其它构建里出现同样签名的失败，会自动归并到该缺陷下，
+        而不是再新建。
+        """
+        payload = payload or {}
+        signatures = list(cluster.get("signatures")
+                          or ([cluster.get("signature")] if cluster.get("signature") else []))
+        priorities = [c.get("priority") for c in cluster.get("cases", [])]
+        severity = payload.get("severity") or (
+            "major" if any(p in ("P0", "P1") for p in priorities)
+            else ("critical" if cluster.get("count", 0) >= 10 else "minor"))
+        title = (payload.get("title")
+                 or f"[自动] {cluster.get('title', '失败簇')}（{cluster.get('count', 0)} 个用例）")
+        description = payload.get("description") or (
+            f"失败聚类自动生成。\n\n代表性报错：\n{cluster.get('reason', '')}\n\n"
+            f"涉及用例：{', '.join(c.get('case_name') or c.get('case_id', '') for c in cluster.get('cases', [])[:10])}")
+        first_case = (cluster.get("cases") or [{}])[0]
+        return self.create(project_id, {
+            "title": title,
+            "description": description,
+            "severity": severity,
+            "source_case_id": first_case.get("case_id"),
+            "source_build_id": build_id,
+            "cluster_id": cluster.get("group_id"),
+            "signatures": signatures,
+            "hit_count": cluster.get("count", 0),
+        })
+
+    def add_signatures(self, defect_id: str, signatures: list[str]) -> Optional[dict]:
+        """把新的失败特征并入缺陷（去重），扩大其自动归并范围。"""
+        defect = self.get(defect_id)
+        if defect is None:
+            return None
+        merged = list(dict.fromkeys(
+            (defect.get("signatures") or []) + [s for s in signatures if s]))
+        return self.update(defect_id, {"signatures": merged})
+
+    def increment_hit(self, defect_id: str, by: int = 1) -> Optional[dict]:
+        defect = self.get(defect_id)
+        if defect is None:
+            return None
+        return self.update(defect_id, {"hit_count": defect.get("hit_count", 0) + by})
 
     def list(self, project_id: str, status: str = None,
              severity: str = None) -> list[dict]:

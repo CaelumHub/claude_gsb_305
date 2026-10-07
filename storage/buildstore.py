@@ -72,6 +72,7 @@ def _empty_build(build_id: str, project_id: str, **kw: Any) -> dict:
         "by_group": {},
         "by_priority": {},
         "durations": [],
+        "clustered_at": None,
         "created_at": time.time(),
     }
     return build

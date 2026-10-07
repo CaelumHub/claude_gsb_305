@@ -107,6 +107,9 @@ async function loadDefects() {
         <span class="badge ${x.status}">${esc(x.status)}</span>
       </div>
       <div class="muted mt" style="font-size:13px">${esc(x.description||"")}</div>
+      ${(x.signatures||[]).length ? `<div class="mt" style="font-size:12px">失败特征（${x.signatures.length}）：
+        ${x.signatures.slice(0,4).map(s => `<span class="tag" style="font-family:monospace;font-size:11px">${esc(s)}</span>`).join(" ")}
+      </div>` : ""}
       <div class="mt" style="font-size:12px;color:var(--text-muted)">
         ${x.assignee?`指派: ${esc(x.assignee)} · `:""}${x.source_case_id?`来源用例: <span class="mono">${esc(x.source_case_id)}</span> · `:""}
         创建 ${fmtTime(x.created_at)}
