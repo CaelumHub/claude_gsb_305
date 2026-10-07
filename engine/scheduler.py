@@ -34,7 +34,7 @@ class Scheduler:
     def __init__(self, registry, build_registry, executor, env_manager,
                  report_gen, coverage_analyzer, defect_manager, notify_manager,
                  max_build_workers: int = 4, max_case_workers: int = 8,
-                 tick_seconds: float = 20.0):
+                 tick_seconds: float = 20.0, cluster_manager=None):
         self.registry = registry
         self.builds = build_registry
         self.executor = executor
@@ -43,6 +43,8 @@ class Scheduler:
         self.coverage = coverage_analyzer
         self.defects = defect_manager
         self.notify = notify_manager
+        # 失败聚类（可选，便于旧测试直接构造 Scheduler 时不传）
+        self.clusterer = cluster_manager
 
         self.max_build_workers = max_build_workers
         self.max_case_workers = max_case_workers
@@ -266,12 +268,20 @@ class Scheduler:
         self.notify.fire(project_id, "build.finished", payload)
         self.notify.fire(project_id, event, payload)
 
-        # 自动缺陷（项目配置开启时，把失败用例转成缺陷）
+        # 失败聚类 + 缺陷归并/建单（命中未关闭缺陷自动归并，而非重复建单）
         project = self.registry.store("projects").get(project_id)
-        if project and project.get("auto_create_defects"):
-            failures = store.results(build_id, where=[("status", "in", ["failed", "error", "timeout"])])
-            for fr in failures[:20]:
-                self.defects.create_from_case(project_id, fr, build_id)
+        auto_defects = bool(project and project.get("auto_create_defects"))
+        try:
+            if self.clusterer is not None:
+                self.clusterer.analyze_build(project_id, build_id,
+                                             create_defects=auto_defects)
+            elif auto_defects:
+                # 兜底：未接入聚类器时保留旧的逐用例建单行为
+                failures = store.results(build_id, where=[("status", "in", ["failed", "error", "timeout"])])
+                for fr in failures[:20]:
+                    self.defects.create_from_case(project_id, fr, build_id)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------ 定时循环
     def _tick_loop(self) -> None:

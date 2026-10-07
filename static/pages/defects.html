@@ -107,6 +107,11 @@ async function loadDefects() {
         <span class="badge ${x.status}">${esc(x.status)}</span>
       </div>
       <div class="muted mt" style="font-size:13px">${esc(x.description||"")}</div>
+      ${(x.fingerprints||[]).length ? `<div class="mt" style="font-size:11px">
+        <span class="muted">失败特征指纹（命中即自动归并到此缺陷）：</span>
+        ${(x.fingerprints||[]).map(f => `<code class="mono" style="font-size:11px;background:#f1f5f9;padding:1px 6px;border-radius:4px;margin-right:4px">${esc(f)}</code>`).join("")}
+        ${x.hit_count ? `<span class="muted">· 累计命中 ${x.hit_count} 次</span>` : ""}
+      </div>` : ""}
       <div class="mt" style="font-size:12px;color:var(--text-muted)">
         ${x.assignee?`指派: ${esc(x.assignee)} · `:""}${x.source_case_id?`来源用例: <span class="mono">${esc(x.source_case_id)}</span> · `:""}
         创建 ${fmtTime(x.created_at)}

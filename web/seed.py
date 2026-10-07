@@ -13,6 +13,79 @@ import time
 from engine import new_id
 
 
+def _status_200_step(name="期望 200"):
+    return {"action": "assert", "type": "status", "actual": "${resp.status}",
+            "expected": 200, "name": name}
+
+
+# 失败聚类演示用例：在零失败率的 dev 环境也稳定失败，分别形成三类簇——
+# 同一接口 404 ×2（接口簇）、同一断言 ×2（断言簇）、同一限流关键词 ×3（关键词簇）
+CLUSTER_DEMO_CASES = [
+    {"name": "用户详情-不存在的用户", "priority": "P1", "tags": ["api", "users"],
+     "steps": [{"action": "request", "method": "GET", "url": "/api/users/1001",
+                "name": "查询不存在用户"}, _status_200_step()]},
+    {"name": "用户详情-另一个不存在的用户", "priority": "P2", "tags": ["api", "users"],
+     "steps": [{"action": "request", "method": "GET", "url": "/api/users/2002",
+                "name": "查询不存在用户"}, _status_200_step()]},
+    {"name": "算术校验 A", "priority": "P2", "tags": ["unit"],
+     "steps": [{"action": "script", "expr": "2 + 3 * 4", "save_as": "result",
+                "name": "算术"},
+               {"action": "assert", "type": "equals", "actual": "${result}",
+                "expected": 15, "name": "结果等于 15"}]},
+    {"name": "算术校验 B", "priority": "P3", "tags": ["unit"],
+     "steps": [{"action": "script", "expr": "2 + 3 * 4", "save_as": "r2",
+                "name": "算术"},
+               {"action": "assert", "type": "equals", "actual": "${r2}",
+                "expected": 15, "name": "结果等于 15"}]},
+]
+for _cname, _cprio, _ctags, _url in [
+    ("限流-查询商品", "P1", ["api", "products"], "/api/shop/products/ratelimit"),
+    ("限流-查询库存", "P2", ["api", "stock"], "/api/shop/stock/ratelimit"),
+    ("限流-查询评论", "P3", ["api", "comments"], "/api/shop/comments/ratelimit"),
+]:
+    CLUSTER_DEMO_CASES.append({
+        "name": _cname, "priority": _cprio, "tags": _ctags,
+        "steps": [{"action": "request", "method": "GET", "url": _url,
+                   "name": "请求被限流的接口"}, _status_200_step()],
+    })
+
+
+def ensure_cluster_demo_cases(registry) -> int:
+    """把失败聚类演示用例幂等补进旧版演示数据的冒烟套件。
+
+    已存在同名用例则跳过；返回新补入的用例数。仓库自带的旧 ``data`` 目录
+    （8 用例版套件）启动时会被补成 15 用例版，失败聚类页一打开就有内容。
+    """
+    projects = registry.store("projects").all()
+    added = 0
+    for project in projects:
+        pid = project["id"]
+        if "演示项目" not in project.get("name", ""):
+            continue
+        cases_store = registry.store("cases")
+        existing_names = {c.get("name") for c in
+                          cases_store.query(where=[("project_id", "eq", pid)])}
+        new_ids = []
+        for spec in CLUSTER_DEMO_CASES:
+            if spec["name"] in existing_names:
+                continue
+            new_ids.append(cases_store.insert({
+                "id": new_id("case"), "project_id": pid,
+                "name": spec["name"], "description": "演示用例",
+                "priority": spec["priority"], "tags": spec["tags"],
+                "timeout": 60, "enabled": True, "steps": spec["steps"],
+                "created_at": time.time(),
+            }))
+            added += 1
+        if new_ids:
+            suites_store = registry.store("suites")
+            for suite in suites_store.query(where=[("project_id", "eq", pid)]):
+                cids = suite.get("case_ids") or []
+                if cids and suite.get("name") == "冒烟测试套件":
+                    suites_store.update(suite["id"], {"case_ids": cids + new_ids})
+    return added
+
+
 def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
     """生成演示项目，返回 ``{"project": ..., "env_id": ..., "suite_id": ...}``。"""
     proj = {
@@ -102,6 +175,11 @@ def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
         {"action": "set", "key": "text", "value": "release-2.31.0", "name": "设置文本"},
         {"action": "assert", "type": "regex", "actual": "${text}", "expected": r"^\d+\.\d+", "name": "匹配版本号"},
     ])
+    # —— 失败聚类演示用例：下列用例在 dev 环境也稳定失败，形成三类簇 ——
+    cluster_ids = []
+    for spec in CLUSTER_DEMO_CASES:
+        cluster_ids.append(_case(spec["name"], spec["priority"],
+                                 spec["tags"], spec["steps"]))
 
     suite = {
         "id": new_id("suite"),
@@ -110,7 +188,7 @@ def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
         "description": "核心链路冒烟",
         "group": "smoke",
         "env_id": env["id"],
-        "case_ids": [c1, c2, c3, c4, c5, c6, c7, c8],
+        "case_ids": [c1, c2, c3, c4, c5, c6, c7, c8] + cluster_ids,
         "created_at": time.time(),
     }
     registry.store("suites").insert(suite)

@@ -53,6 +53,10 @@ def _defects():
     return current_app.config["DEFECTS"]
 
 
+def _clusterer():
+    return current_app.config["CLUSTERER"]
+
+
 def _notify():
     return current_app.config["NOTIFY"]
 
@@ -447,6 +451,90 @@ def build_report(build_id: str):
 def project_reports(project_id: str):
     limit = request.args.get("limit", 20, type=int)
     return jsonify(_report().project_report(project_id, limit=limit))
+
+
+# ---------------------------------------------------------------------------
+# 失败聚类
+# ---------------------------------------------------------------------------
+
+@api.get("/builds/<build_id>/clusters")
+def build_clusters(build_id: str):
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    force = request.args.get("force") == "1"
+    data = _clusterer().get_or_analyze(build["project_id"], build_id, force=force)
+    if data is None or "error" in data:
+        return _err((data or {}).get("error", "暂无聚类结果"), 404)
+    return jsonify(data)
+
+
+@api.post("/builds/<build_id>/clusters/analyze")
+def analyze_clusters(build_id: str):
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    data = _payload()
+    create_defects = data.get("create_defects")
+    result = _clusterer().analyze_build(
+        build["project_id"], build_id, create_defects=create_defects)
+    if "error" in result:
+        return _err(result["error"])
+    return jsonify(result)
+
+
+@api.post("/builds/<build_id>/clusters/<cluster_id>/merge")
+def merge_clusters(build_id: str, cluster_id: str):
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    source_id = _payload().get("source_id")
+    if not source_id:
+        return _err("缺少 source_id")
+    result = _clusterer().merge(build["project_id"], build_id, cluster_id, source_id)
+    if "error" in result:
+        return _err(result["error"])
+    return jsonify(result)
+
+
+@api.post("/builds/<build_id>/clusters/<cluster_id>/split")
+def split_cluster(build_id: str, cluster_id: str):
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    case_ids = _payload().get("case_ids") or []
+    result = _clusterer().split(build["project_id"], build_id, cluster_id, case_ids)
+    if "error" in result:
+        return _err(result["error"])
+    return jsonify(result)
+
+
+@api.put("/builds/<build_id>/clusters/<cluster_id>/defect")
+def set_cluster_defect(build_id: str, cluster_id: str):
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    defect_id = _payload().get("defect_id")
+    result = _clusterer().set_defect(build["project_id"], build_id,
+                                     cluster_id, defect_id)
+    if "error" in result:
+        return _err(result["error"])
+    return jsonify(result)
+
+
+@api.get("/projects/<project_id>/failure-points")
+def list_failure_points(project_id: str):
+    status = request.args.get("status")
+    points = _clusterer().failure_points(project_id, status=status)
+    return jsonify({"failure_points": points})
+
+
+@api.get("/failure-points/<fingerprint>")
+def get_failure_point(fingerprint: str):
+    point = _clusterer().failure_point(fingerprint)
+    if point is None:
+        return _err("失败点不存在", 404)
+    return jsonify(point)
 
 
 # ---------------------------------------------------------------------------

@@ -26,6 +26,7 @@ from .environments import EnvironmentManager
 from .coverage import CoverageAnalyzer
 from .report import ReportGenerator
 from .defects import DefectManager
+from .clustering import FailureClusterManager
 from .notify import NotificationManager
 from .scheduler import Scheduler
 
@@ -44,6 +45,7 @@ __all__ = [
     "CoverageAnalyzer",
     "ReportGenerator",
     "DefectManager",
+    "FailureClusterManager",
     "NotificationManager",
     "Scheduler",
 ]

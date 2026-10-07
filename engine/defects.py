@@ -36,6 +36,9 @@ class DefectManager:
             "source_build_id": payload.get("source_build_id"),
             "assignee": payload.get("assignee", ""),
             "tags": payload.get("tags") or [],
+            # 失败特征指纹：新构建命中任一指纹且缺陷未关闭时自动归并，不再重复建单
+            "fingerprints": payload.get("fingerprints") or [],
+            "hit_count": payload.get("hit_count", 0),
         }
         self._store.insert(defect)
         return defect

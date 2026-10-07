@@ -154,11 +154,25 @@ class MockTarget:
             payload = {"ok": False, "error": "simulated server error"}
         if "slow" in path.lower():
             latency += 600
-        # 环境级失败率：确定性伪随机，同一环境同一用例结果稳定
-        if self.fail_rate > 0 and _seeded_int(case_id, step_index, "fail") % 1000 < self.fail_rate * 1000:
+        if "ratelimit" in path.lower() or "too-many" in path.lower():
+            status = 429
+            # 业务前缀（如 shop）带进错误文案：不同限流接口（products / stock /
+            # comments）因此共享同一关键词「shop Rate Limit Exceeded」聚成簇，
+            # 而它们各自的路径又不会误并成接口簇
+            seg = [s for s in path.split("/") if s]
+            top = seg[1] if len(seg) > 1 and seg[0] == "api" else "api"
+            payload = {"ok": False, "error": f"{top} Rate Limit Exceeded"}
+        # 环境级失败率：确定性伪随机，同一环境同一用例结果稳定；
+        # 显式命中错误路径的用例不被环境注入覆盖，保证失败语义稳定可聚类
+        if status == 200 and self.fail_rate > 0 and \
+                _seeded_int(case_id, step_index, "fail") % 1000 < self.fail_rate * 1000:
             status = 500
             payload = {"ok": False, "error": "injected failure (env fail_rate)"}
         if "notfound" in path.lower() or status == 404:
+            status = 404
+            payload = {"ok": False, "error": "not found"}
+        # /api/users/<数字> 模拟不存在的用户资源
+        if re.search(r"/users/\d+(?:/|$)", path):
             status = 404
             payload = {"ok": False, "error": "not found"}
 
@@ -301,7 +315,12 @@ class TestExecutor:
                 )
                 save_as = step.get("save_as") or "resp"
                 variables[save_as] = resp
-                return _done("passed", f"{method} {url} -> {resp['status']} ({resp['latency_ms']}ms)")
+                msg = f"{method} {url} -> {resp['status']} ({resp['latency_ms']}ms)"
+                # 非 2xx 时把错误文案带进步骤消息，供失败聚类提取报错关键词
+                body = resp.get("body")
+                if resp["status"] >= 400 and isinstance(body, dict) and body.get("error"):
+                    msg += f" | error: {body['error']}"
+                return _done("passed", msg)
 
             if action == "set":
                 key = step.get("key")

@@ -21,10 +21,10 @@ if BASE_DIR not in sys.path:
 
 from engine import (Scheduler, TestExecutor, EnvironmentManager,          # noqa: E402
                     CoverageAnalyzer, ReportGenerator, DefectManager,
-                    NotificationManager)
+                    FailureClusterManager, NotificationManager)
 from storage import StoreRegistry, BuildStoreRegistry                       # noqa: E402
 from web import api                                                         # noqa: E402
-from web.seed import seed_demo_data                                         # noqa: E402
+from web.seed import seed_demo_data, ensure_cluster_demo_cases              # noqa: E402
 
 
 def create_app(data_root: str | None = None) -> Flask:
@@ -44,11 +44,13 @@ def create_app(data_root: str | None = None) -> Flask:
     coverage = CoverageAnalyzer(build_registry)
     report_gen = ReportGenerator(build_registry)
     defects = DefectManager(registry)
+    clusterer = FailureClusterManager(registry, build_registry, defects)
     notify = NotificationManager(registry)
     scheduler = Scheduler(
         registry, build_registry, executor, env_manager,
         report_gen, coverage, defects, notify,
         max_build_workers=4, max_case_workers=8, tick_seconds=20,
+        cluster_manager=clusterer,
     )
 
     # -- 注入 Flask config -------------------------------------------------
@@ -60,6 +62,7 @@ def create_app(data_root: str | None = None) -> Flask:
     app.config["COVERAGE"] = coverage
     app.config["REPORT_GEN"] = report_gen
     app.config["DEFECTS"] = defects
+    app.config["CLUSTERER"] = clusterer
     app.config["NOTIFY"] = notify
     app.config["JSON_AS_ASCII"] = False
 
@@ -83,6 +86,19 @@ def create_app(data_root: str | None = None) -> Flask:
         try:
             scheduler.submit_build(
                 seeded["project"]["id"], seeded["suite_id"], trigger="auto_seed")
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        # 旧版演示数据：幂等补入失败聚类演示用例，让聚类页直接有三类簇可看
+        try:
+            added = ensure_cluster_demo_cases(registry)
+            if added:
+                project = registry.store("projects").all()[0]
+                suites = registry.store("suites").query(
+                    where=[("project_id", "eq", project["id"])])
+                if suites:
+                    scheduler.submit_build(
+                        project["id"], suites[0]["id"], trigger="auto_seed")
         except Exception:  # noqa: BLE001
             pass
 

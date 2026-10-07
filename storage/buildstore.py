@@ -376,6 +376,15 @@ class BuildStore:
         path = os.path.join(self._build_dir(build_id), "report.json")
         return read_json(path, None)
 
+    def write_clusters(self, build_id: str, clusters: dict) -> None:
+        """写失败聚类结果（与报告缓存并列，人工调整后整体覆盖）。"""
+        with FileLock(self._lock(build_id)):
+            atomic_write_json(os.path.join(self._build_dir(build_id), "clusters.json"), clusters)
+
+    def read_clusters(self, build_id: str) -> Optional[dict]:
+        path = os.path.join(self._build_dir(build_id), "clusters.json")
+        return read_json(path, None)
+
 
 class BuildStoreRegistry:
     """按项目缓存 :class:`BuildStore` 实例。"""
